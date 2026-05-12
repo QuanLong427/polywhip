@@ -1,0 +1,197 @@
+# scan.whip
+# 功能：扫描天气预测市场，计算 edge，筛选值得交易的合约
+# 前置：/home/trader/.polywhip_config 中 WALLET_ADDRESS 和 POLY_API_KEY 已填写
+# 输出：/home/trader/skill_result/opportunities.json（edge 达标的候选仓位）
+
+agent forecaster:
+  provider: "claude-code"
+  model: sonnet
+  tools: ["bash", "read", "write"]
+  prompt: """
+  天气预报数据专家。从 Open-Meteo 集合预报 API 提取概率分布，
+  计算每个温度区间的模型概率。输出必须精确到小数点后4位。
+  """
+
+agent analyst:
+  provider: "claude-code"
+  model: sonnet
+  tools: ["bash", "read", "write"]
+  prompt: """
+  预测市场分析专家。计算模型概率与市场隐含概率之间的 edge，
+  应用风控过滤规则，输出可执行的交易机会列表。
+  所有计算过程必须透明，附完整推导数据。
+  """
+
+# ── 读取配置 ──
+let config = session: forecaster
+  prompt: """
+  读取交易配置：
+  1. 读取 /home/trader/.polywhip_config（KEY=VALUE 格式），然后将提取的VALUE按键填到输出JSON中
+  2. 读取 /home/trader/skill_result/positions.json（不存在则 []），统计当前持仓数，对应JSON中的键是CURRENT_POSITIONS
+  3. 读取 /home/trader/skill_result/trades.json（不存在则 []），计算今日已实现亏损，对应JSON中的键是DAILY_PNL
+
+  输出 JSON（键名与 .polywhip_config 一致，值为读取到的实际值，如.polywhip_config读取到的MIN_EDGE为0.5，那输出的json填写的键值对为："MIN_EDGE":0.5）：
+  {
+    WALLET_ADDRESS,
+    POLY_API_KEY,
+    DATA_DIR,
+    PROXY,
+    MIN_EDGE,
+    MIN_EDGE_PRECIP,
+    SUMMER_MIN_EDGE,
+    HIGH_SPREAD_MIN_EDGE,
+    SKIP_EDGE_LOW,
+    SKIP_EDGE_HIGH,
+    CORRELATION_DISCOUNT,
+    MAX_POSITION_PCT,
+    MAX_POSITIONS,
+    MAX_EXPOSURE_PCT,
+    MIN_ORDER_USDC,
+    DAILY_LOSS_LIMIT_PCT,
+    ENSEMBLE_SPREAD_LIMIT,
+    HIGH_SPREAD_THRESHOLD,
+    LOW_SPREAD_THRESHOLD,
+    MIN_LIQUIDITY,
+    MIN_VOLUME,
+    CITIES,
+    CURRENT_POSITIONS: N,
+    DAILY_PNL: X,
+    SCAN_DATE: "YYYY-MM-DD",
+  }
+  """
+
+# ── 拉取并过滤市场数据（先执行，为预报提供 bin 边界）──
+let filtered_markets = session: analyst
+  prompt: """
+  执行预过滤脚本拉取 Polymarket 天气市场数据：
+
+  配置：{config}
+
+  运行命令：
+  bash $POLY_SKILL_SCRIPTS/filter-markets.sh
+
+  脚本会自动：
+  1. 从 Gamma API 拉取所有天气市场
+  2. 按城市硬编码过滤（Shanghai, Seoul, Toronto, NYC, London, Tokyo, Singapore, Shenzhen）
+  3. 只保留最高温（highest）事件
+  4. 过滤 volumeNum < 1000 的低流动性合约
+  5. 预解析 bin 格式：label → {low, high}（华氏度已转摄氏度）
+  6. 输出到 DATA_DIR/markets-filtered.json
+
+  执行后读取 DATA_DIR/markets-filtered.json，输出其内容。
+  """
+
+# ── 拉取集合天气预报（使用市场 bin 边界）──
+let forecasts = session: forecaster
+  prompt: """
+  从 Open-Meteo 集合预报 API 拉取各城市今明两天温度预报：
+
+  配置：{config}
+  市场数据：{filtered_markets}
+
+  对每个城市调用：
+  https://ensemble-api.open-meteo.com/v1/ensemble
+  参数：
+    - shanghai:   latitude=31.15, longitude=121.81
+    - seoul:      latitude=37.49, longitude=126.49
+    - toronto:    latitude=43.71, longitude=-79.66
+    - nyc:        latitude=40.76, longitude=-73.86
+    - london:     latitude=51.51, longitude=-0.03
+    - tokyo:      latitude=35.55, longitude=139.78
+    - singapore:  latitude=1.35,  longitude=104.00
+    - shenzhen:   latitude=22.64, longitude=113.83
+  models: icon_seamless（优先），ecmwf_ifs025（备用）
+  hourly: temperature_2m
+  ensemble_members: all
+
+  对每个城市计算今天和明天最高气温的概率分布（两天各一组）：
+  - 对每个 member，取当天所有小时的 temperature_2m 最大值 → 该 member 的日最高温
+  - 39 个 member 得到 39 个日最高温值
+  - 使用 {filtered_markets} 中该城市的 bin 边界进行 binning：
+    · 对每个 market bin {low, high}（right-closed），统计落入该区间的 member 数量
+    · 例：market bin {low: 19, high: 20} → 统计 19 < temp <= 20 的 member 数
+    · 对 "X°C or below"（low=null）：统计 temp <= high 的 member 数
+    · 对 "X°C or higher"（high=null）：统计 temp > low 的 member 数
+  - P(bin) = count(members in bin) / total_members
+  - ensemble_spread = std(39个日最高温值)
+  - 每天输出一组 { date, bins, spread }
+
+  写入 DATA_DIR/forecasts.json：
+  [{ city, model, member_count, date, bins: [{low, high, probability}], spread }]
+  注意：每个城市有两条记录（今天 + 明天）。bins 的 low/high 与 {filtered_markets} 中的 bin 边界完全一致。
+
+  输出预报摘要（每城市每天最高概率区间）。
+  """
+
+# ── 匹配市场定价与模型概率 ──
+let market_prices = session: analyst
+  prompt: """
+  将市场数据与预报数据匹配，计算每个 bin 的模型概率：
+
+  市场数据：{filtered_markets}
+  预报数据：{forecasts}
+
+  匹配规则（bin 边界已对齐，直接精确匹配）：
+  - 逐个 bin 按 city + date + low + high 精确匹配
+  - market_prob: 市场隐含概率（来自 {filtered_markets}）
+  - p_model: 模型概率（来自 {forecasts}）
+  - token_id: Yes token ID（下单用）
+
+  输出：[{ city, date, event_id, bins: [{market_id, label, low, high, market_prob, p_model, token_id, liquidity}], event_liquidity }]
+  """
+
+# ── 计算 edge 并筛选机会 ──
+let opportunities = session: analyst
+  prompt: """
+  对比模型概率与市场价格，计算每个区间的 edge：
+
+  市场价格：{market_prices}
+  当前状态：{config}
+
+  计算规则：
+  - {market_prices} 中每个 bin 已包含 p_model 和 market_prob
+  - edge = p_model - market_prob
+
+  过滤条件（全部满足才保留，阈值从配置读取）：
+  1. edge >= MIN_EDGE（最低门槛）
+     - 如果是降水相关合约：edge >= MIN_EDGE_PRECIP
+     - 如果当前月份为 6/7/8（上海夏季）：edge >= SUMMER_MIN_EDGE
+     - 如果 ensemble_spread > HIGH_SPREAD_THRESHOLD：edge >= HIGH_SPREAD_MIN_EDGE（模型不确定性高，提高门槛）
+  2. edge < SKIP_EDGE_LOW 或 edge > SKIP_EDGE_HIGH（跳过过度自信区间）
+  3. 市场流动性 > MIN_LIQUIDITY
+  4. 当前持仓数 < MAX_POSITIONS（风控上限）
+  5. 当前总敞口 < MAX_EXPOSURE_PCT（总敞口上限）
+  6. 今日亏损未超过 DAILY_LOSS_LIMIT_PCT
+  7. ensemble_spread <= ENSEMBLE_SPREAD_LIMIT（模型分歧过大时直接跳过，不做交易）
+
+  对每个通过过滤的机会，计算仓位大小(没有可用余额时, 可以不计算仓位大小)：
+  - full_kelly = edge / (1 - P_market)
+  - half_kelly = 0.5 * full_kelly
+  - 如果同城市已有仓位：half_kelly *= (1 - CORRELATION_DISCOUNT)
+  - spread_discount = max(0.4, 1 - (spread - LOW_SPREAD_THRESHOLD) / 5)（spread 越大仓位越小）
+  - half_kelly *= spread_discount
+  - max_position = min(half_kelly * capital, capital * MAX_POSITION_PCT)
+  - 最终下单金额 = max(MIN_ORDER_USDC, min(max_position, 可用余额))
+
+  写入 DATA_DIR/opportunities.json：
+  [{
+    city, date, market_id, token_id,
+    bin_low, bin_high,
+    p_model, p_market, edge,
+    position_size_usdc,
+    kelly_fraction,
+    liquidity,
+    model_spread,
+    rationale: "[一句话说明为什么有 edge]",
+    ts: "[ISO]"
+  }]
+
+  输出 WorkflowEvent：
+  {"ts":"[ISO]","event":"stage_complete","stage":"scan","data":{
+    "cities_scanned": N,
+    "markets_checked": N,
+    "opportunities_found": N,
+    "top_edge": X,
+    "ready_to_trade": true/false
+  }}
+  """

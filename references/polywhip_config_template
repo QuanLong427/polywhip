@@ -1,0 +1,64 @@
+# ═══════════════════════════════════════════════════════════════
+# WhipFlow 全局配置
+# ═══════════════════════════════════════════════════════════════
+# 所有 .whip 工作流、filter-markets.sh、dashboard 共用此文件。
+# 格式：KEY=VALUE（shell 可 source，LLM 可直接读取）。
+# 修改后立即生效，无需重启。
+# ═══════════════════════════════════════════════════════════════
+
+# ── 路径 ──
+# 数据输出目录（所有工作流的 JSON 文件写入此处）
+DATA_DIR="/home/trader/skill_result"
+
+# ── 网络 ──
+# HTTP 代理（用于访问 Gamma API，留空则不使用代理）
+PROXY="http://192.168.232.1:7897"
+
+# ── Edge 过滤门槛 ──
+# 最低 edge（低于此值不交易）
+MIN_EDGE=0.05
+# 降水相关合约最低 edge（降水预测不确定性更高，提高门槛）
+MIN_EDGE_PRECIP=0.15
+# 夏季上海（6/7/8月）最低 edge（夏季温度波动大）
+SUMMER_MIN_EDGE=0.12
+# ensemble spread > 2.5°C 时的最低 edge（模型分歧大，提高门槛）
+HIGH_SPREAD_MIN_EDGE=0.10
+# 跳过过度自信区间：edge 在此范围内不做交易（市场可能已反映信息）
+SKIP_EDGE_LOW=0.30
+SKIP_EDGE_HIGH=0.40
+
+# ── Kelly 仓位管理 ──
+# Kelly 系数倍数（half_kelly = 0.5 * full_kelly，更保守）
+HALF_KELLY=0.5
+# 同城市已有仓位的相关性折扣（ρ=0.65，降低相关性风险）
+CORRELATION_DISCOUNT=0.65
+# 单仓最大占初始资金比例
+MAX_POSITION_PCT=0.10
+# 最大同时持仓数
+MAX_POSITIONS=3
+# 总敞口占初始资金比例上限
+MAX_EXPOSURE_PCT=0.80
+# CLOB 最小下单金额（USDC）
+MIN_ORDER_USDC=5
+
+# ── 风控 ──
+# 日亏损熔断比例（亏损超过初始资金的此比例，停止交易）
+DAILY_LOSS_LIMIT_PCT=0.05
+# ensemble spread 上限（超过此值直接跳过，不做交易）
+ENSEMBLE_SPREAD_LIMIT=4.0
+# 高 spread 阈值（超过此值提高 edge 门槛）
+HIGH_SPREAD_THRESHOLD=2.5
+# 低 spread 阈值（低于此值不打折）
+LOW_SPREAD_THRESHOLD=1.5
+
+# ── 市场过滤 ──
+# 最低流动性（USDC），低于此值的市场不交易
+MIN_LIQUIDITY=5000
+# 最低成交量，低于此值的合约不纳入
+MIN_VOLUME=1000
+
+# ── Dashboard ──
+DASHBOARD_PORT=8099
+
+# ── 监控城市 ──
+CITIES="shanghai seoul toronto nyc london tokyo singapore shenzhen"
