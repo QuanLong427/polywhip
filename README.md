@@ -23,7 +23,7 @@ Open-Meteo 集合预报 (39 members)          Polymarket 天气市场
 
 ## 架构
 
-基于 [WhipFlow](https://github.com/anthropics/claude-code) DSL 的多 agent 工作流：
+基于 [WhipFlow](https://github.com/npc-live/whipflow) DSL 的多 agent 工作流：
 
 - **母 agent**（Hermes / OpenClaw）加载 skill，设置环境变量，调度工作流
 - **`.whip` 工作流**编排多个 session，每个 session 启动一个独立 LLM agent
